@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Violet Ribbons</title>
+  <style>
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+    }
+    #shader {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      background: #000;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="shader"></canvas>
+
+  <script id="vs" type="x-shader/x-vertex">
+    attribute vec2 aPos;
+    void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+  </script>
+
+  <script id="fs" type="x-shader/x-fragment">
+    precision highp float;
+
+    uniform vec2  uRes;
+    uniform float uTime;
+
+    // Shapes are authored in normalized screen space: u = 0..1 across, v = 0..1 up.
+    // Distances are measured in "height units" (x scaled by aspect) so glow stays round.
+    float ASPECT;
+
+    // Glow profile: tight hot core + soft halo. `below` widens the halo under the
+    // line, which gives the lit-silk look of the reference.
+    float glow(float d, float side, float core, float halo, float below) {
+      float h = side < 0.0 ? halo * below : halo;
+      return 3.2 * exp(-pow(d / core, 2.0)) + 0.85 * exp(-d / h) + 0.12 * exp(-pow(d / (h * 2.5), 2.0));
+    }
+
+    // A ribbon defined as v = f(u). Distance uses the slope so width stays even.
+    float ribbonDist(vec2 p, float y, float dy, out float side) {
+      side = p.y - y;
+      return abs(side) / sqrt(1.0 + dy * dy);
+    }
+
+    float segDist(vec2 p, vec2 a, vec2 b, out float h) {
+      vec2 pa = p - a, ba = b - a;
+      h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+      return length(pa - ba * h);
+    }
+
+    // Lower-left hump, rising to ~12% of the height.
+    float fHump(float u, float t) {
+      float c = 0.27 + 0.025 * sin(t * 0.35);
+      float w = 0.16 + 0.015 * sin(t * 0.27 + 1.0);
+      return (0.135 + 0.012 * sin(t * 0.5)) * exp(-pow((u - c) / w, 2.0)) - 0.03
+             + 0.008 * sin(u * 11.0 + t * 0.9);
+    }
+
+    // Long wave rising to the right edge.
+    float fRise(float u, float t) {
+      return (u - 0.43) * 0.52
+             + 0.022 * sin(u * 9.0 - t * 0.7)
+             + 0.012 * sin(u * 23.0 + t * 1.1 + 2.0);
+    }
+
+    // Fainter companion strand that weaves around the rising wave.
+    float fRise2(float u, float t) {
+      return (u - 0.47) * 0.6
+             + 0.035 * sin(u * 7.0 + t * 0.55 + 1.3)
+             - 0.02;
+    }
+
+    void main() {
+      vec2 frag = gl_FragCoord.xy;
+      ASPECT = uRes.x / uRes.y;
+      float u = frag.x / uRes.x;
+      float v = frag.y / uRes.y;
+      vec2 p = vec2(u * ASPECT, v);
+      float t = uTime;
+      float px = 1.0 / uRes.y;
+      float eps = 0.002;
+
+      float I = 0.0;
+      float side, d, y, dy, h;
+
+      // ---- Left loop: an elliptical arc that curls over and sweeps down-left ----
+      {
+        vec2 c  = vec2((0.14 + 0.012 * sin(t * 0.4)) * ASPECT, 0.165 + 0.01 * sin(t * 0.33));
+        vec2 r  = vec2((0.15 + 0.01 * sin(t * 0.29 + 2.0)) * ASPECT, 0.195 + 0.012 * sin(t * 0.45));
+        vec2 q  = p - c;
+        vec2 qn = q / r;
+        float L = length(qn);
+        vec2 g  = q / (r * r) / max(L, 1e-4);
+        d = abs(L - 1.0) / max(length(g), 1e-4);
+        side = L - 1.0;                      // outside of the loop = "above"
+        float ang = atan(qn.y, qn.x);        // -PI..PI, 0 = right, PI/2 = top
+        // Visible from the lower-right (about -100deg) round the top to the far left.
+        float m = smoothstep(-1.9, -0.9, ang) * (1.0 - smoothstep(2.75, 3.14, ang));
+        // Travelling sheen along the arc.
+        m *= 0.45 + 1.3 * pow(0.5 + 0.5 * sin(ang * 1.7 - t * 0.6), 3.0);
+        m *= 0.8 + 0.35 * smoothstep(1.2, 0.2, abs(ang - 1.2));
+        I += m * glow(d, -side, 0.0075 + px, 0.024, 1.8);
+      }
+
+      // ---- Lower-left hump ----
+      {
+        y  = fHump(u, t);
+        dy = (fHump(u + eps, t) - fHump(u - eps, t)) / (2.0 * eps) / ASPECT;
+        d  = ribbonDist(p, y, dy, side);
+        float m = smoothstep(0.02, 0.16, u) * (1.0 - smoothstep(0.42, 0.52, u));
+        m *= 0.45 + 1.3 * pow(0.5 + 0.5 * sin(u * 8.0 - t * 0.8), 3.0);
+        I += 0.95 * m * glow(d, side, 0.0065 + px, 0.026, 1.6);
+      }
+
+      // ---- Main rising wave toward the right edge ----
+      {
+        y  = fRise(u, t);
+        dy = (fRise(u + eps, t) - fRise(u - eps, t)) / (2.0 * eps) / ASPECT;
+        d  = ribbonDist(p, y, dy, side);
+        float m = smoothstep(0.36, 0.55, u);
+        m *= 0.45 + 1.3 * pow(0.5 + 0.5 * sin(u * 10.0 - t * 1.0 + 0.5), 3.0);
+        I += 0.95 * m * glow(d, side, 0.007 + px, 0.03, 1.9);
+      }
+
+      // ---- Companion strand ----
+      {
+        y  = fRise2(u, t);
+        dy = (fRise2(u + eps, t) - fRise2(u - eps, t)) / (2.0 * eps) / ASPECT;
+        d  = ribbonDist(p, y, dy, side);
+        float m = smoothstep(0.45, 0.7, u) * (0.5 + 0.5 * sin(u * 6.0 + t * 0.7));
+        I += 0.55 * m * glow(d, side, 0.006 + px, 0.03, 2.2);
+      }
+
+      // ---- Silk creases: sharp diagonal folds that fade upward ----
+      {
+        vec2 a = vec2((0.80 + 0.01 * sin(t * 0.6)) * ASPECT, 0.15 + 0.01 * sin(t * 0.8));
+        vec2 b = vec2((0.955 + 0.02 * sin(t * 0.45 + 1.0)) * ASPECT, 0.46 + 0.04 * sin(t * 0.5));
+        d = segDist(p, a, b, h);
+        float m = smoothstep(0.0, 0.15, h) * pow(1.0 - h, 1.3);
+        m *= 0.75 + 0.25 * sin(t * 0.9);
+        float s = cross(vec3(b - a, 0.0), vec3(p - a, 0.0)).z;
+        I += 1.2 * m * glow(d, s, 0.007 + px, 0.022, 2.6);
+      }
+      {
+        vec2 a = vec2((0.60 + 0.012 * sin(t * 0.5 + 2.0)) * ASPECT, 0.09);
+        vec2 b = vec2((0.685 + 0.02 * sin(t * 0.4)) * ASPECT, 0.27 + 0.03 * sin(t * 0.55 + 1.0));
+        d = segDist(p, a, b, h);
+        float m = smoothstep(0.0, 0.2, h) * pow(1.0 - h, 1.6);
+        m *= 0.6 + 0.4 * sin(t * 0.7 + 1.5);
+        float s = cross(vec3(b - a, 0.0), vec3(p - a, 0.0)).z;
+        I += 0.7 * m * glow(d, s, 0.006 + px, 0.024, 2.6);
+      }
+      {
+        vec2 a = vec2((0.86 + 0.01 * sin(t * 0.5)) * ASPECT, 0.12);
+        vec2 b = vec2((1.02) * ASPECT, 0.36 + 0.03 * sin(t * 0.6 + 0.5));
+        d = segDist(p, a, b, h);
+        float m = smoothstep(0.0, 0.25, h) * pow(1.0 - h, 1.0);
+        float s = cross(vec3(b - a, 0.0), vec3(p - a, 0.0)).z;
+        I += 0.5 * m * glow(d, s, 0.007 + px, 0.03, 2.0);
+      }
+
+      // Keep everything in the lower part of the page.
+      I *= 1.0 - smoothstep(0.38, 0.55, v);
+
+      // Tone map: halo reads deep blue-violet, cores burn to lavender white.
+      vec3 col = 1.0 - exp(-I * vec3(0.30, 0.17, 1.45));
+
+      // Tiny dither to kill banding in the soft gradients.
+      float n = fract(sin(dot(frag, vec2(12.9898, 78.233))) * 43758.5453);
+      col += (n - 0.5) / 255.0;
+
+      gl_FragColor = vec4(max(col, 0.0), 1.0);
+    }
+  </script>
+
+  <script>
+    (function () {
+      const canvas = document.getElementById('shader');
+      const gl = canvas.getContext('webgl', { antialias: false, alpha: false });
+      if (!gl) return;
+
+      function compile(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+          console.error(gl.getShaderInfoLog(s));
+        }
+        return s;
+      }
+
+      const prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, document.getElementById('vs').text));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, document.getElementById('fs').text));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        console.error(gl.getProgramInfoLog(prog));
+        return;
+      }
+      gl.useProgram(prog);
+
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(prog, 'aPos');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+      const uRes = gl.getUniformLocation(prog, 'uRes');
+      const uTime = gl.getUniformLocation(prog, 'uTime');
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const w = Math.floor(canvas.clientWidth * dpr);
+        const h = Math.floor(canvas.clientHeight * dpr);
+        if (canvas.width !== w || canvas.height !== h) {
+          canvas.width = w;
+          canvas.height = h;
+          gl.viewport(0, 0, w, h);
+        }
+      }
+
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const params = new URLSearchParams(location.search);
+      const fixedTime = params.has('t') ? parseFloat(params.get('t')) : null;
+      const start = performance.now();
+
+      function frame(now) {
+        resize();
+        const t = fixedTime !== null ? fixedTime : (now - start) / 1000;
+        gl.uniform2f(uRes, canvas.width, canvas.height);
+        gl.uniform1f(uTime, t);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        if (!reduceMotion && fixedTime === null) requestAnimationFrame(frame);
+      }
+      window.addEventListener('resize', () => requestAnimationFrame(frame));
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
